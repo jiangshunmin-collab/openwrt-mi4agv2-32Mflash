@@ -59,16 +59,30 @@ jobs:
 
           # 第三步：适配32M Flash（关键修改：先修改设备分区表，再扩容根文件系统）
           ## 3.1 修改小米4A千兆V2的dts分区表（指定32M Flash的overlay分区大小，核心步骤！）
-          DTS_FILE="target/linux/ramips/dts/mt7621_xiaomi_mi-router-4a-gigabit-v2.dts"
+          #DTS_FILE="target/linux/ramips/dts/mt7621_xiaomi_mi-router-4a-gigabit-v2.dts"
           # 备份原始dts文件
-          cp $DTS_FILE ${DTS_FILE}.bak
+          #cp $DTS_FILE ${DTS_FILE}.bak
           # 修改分区表：将overlay分区大小改为23M（对应32M Flash，预留其他分区空间）
-          sed -i '/partition@180000 {/,$ s/size = <0x[0-9a-f]*>;/size = <0x1700000>;/' $DTS_FILE
-          sed -i '/partition@180000 {/a \t\t\tlabel = "overlay";' $DTS_FILE
+          #sed -i '/partition@180000 {/,$ s/size = <0x[0-9a-f]*>;/size = <0x1700000>;/' $DTS_FILE
+          #sed -i '/partition@180000 {/a \t\t\tlabel = "overlay";' $DTS_FILE
 
           ## 3.2 扩容rootfs_data（overlay）到23MB（与dts分区表对应，官方标准化配置）
+          #echo "CONFIG_TARGET_ROOTFS_PARTSIZE=23" >> .config
+          #echo "CONFIG_TARGET_ROOTFS_SQUASHFS=y" >> .config # 强制使用squashfs格式，兼容扩容
+
+
+          # 第三步：适配32M Flash（修正DTS语法，精准修改分区表）
+          ## 3.1 定义DTS文件路径
+          DTS_FILE="target/linux/ramips/dts/mt7621_xiaomi_mi-router-4a-gigabit-v2.dts"
+          ## 3.2 备份原始DTS文件
+          cp $DTS_FILE ${DTS_FILE}.bak
+          ## 3.3 精准修改overlay分区（32M Flash：起始地址0x180000，大小0x1700000=23M）
+          # 先删除原有分区的size配置，再新增正确配置（避免重复）
+          sed -i '/partition@180000 {/,/};/ s/size = <0x[^>]*>;//g' $DTS_FILE
+          sed -i '/partition@180000 {/a \t\t\tsize = <0x1700000>;\n\t\t\tlabel = "overlay";' $DTS_FILE
+          ## 3.4 扩容根文件系统
           echo "CONFIG_TARGET_ROOTFS_PARTSIZE=23" >> .config
-          echo "CONFIG_TARGET_ROOTFS_SQUASHFS=y" >> .config # 强制使用squashfs格式，兼容扩容
+          echo "CONFIG_TARGET_ROOTFS_SQUASHFS=y" >> .config
 
           # 第四步：确保内置完整Luci（继承官方默认，额外显式指定避免遗漏）
           echo "CONFIG_PACKAGE_luci=y" >> .config
@@ -78,7 +92,7 @@ jobs:
 
           # 第五步：生成最终配置（解决依赖冲突，确保所有配置生效）
           make defconfig
-
+          make menuconfig -o .config  # 自动解决.config配置冲突，生成优化后的配置文件
 
       # 步骤6：下载所需软件包（提前缓存，加快编译速度）
       - name: Download Required Packages
