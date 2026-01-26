@@ -47,12 +47,9 @@ jobs:
       # 步骤5：配置固件（官方默认配置 + 32M Flash适配，无需修改dts）
       - name: Configure Firmware (Official Default + 32M Flash)
         run: |
-          # 第一步：加载对应内核版本的官方默认配置（以仓库实际config-6.1为准，兼容config-6.12）
-          if [ -f "target/linux/ramips/mt7621/config-6.12" ]; then
-            cat target/linux/ramips/mt7621/config-6.12 > .config
-          else
-            cat target/linux/ramips/mt7621/config-6.6 > .config
-          fi
+          # 第一步：加载对应内核版本的官方默认配置
+          cat target/linux/ramips/mt7621/config-6.6 > .config
+
 
           # 第二步：强制指定小米4A千兆版V2设备
           echo "CONFIG_TARGET_ramips=y" >> .config
@@ -60,16 +57,28 @@ jobs:
           echo "CONFIG_TARGET_ramips_mt7621_DEVICE_xiaomi_mi-router-4a-gigabit-v2=y" >> .config
           echo "CONFIG_TARGET_MULTI_PROFILE=n" >> .config
 
-          # 第三步：适配32M Flash，扩容rootfs_data到23MB（官方标准化配置，无需修改dts）
+          # 第三步：适配32M Flash（关键修改：先修改设备分区表，再扩容根文件系统）
+          ## 3.1 修改小米4A千兆V2的dts分区表（指定32M Flash的overlay分区大小，核心步骤！）
+          DTS_FILE="target/linux/ramips/dts/mt7621_xiaomi_mi-router-4a-gigabit-v2.dts"
+          # 备份原始dts文件
+          cp $DTS_FILE ${DTS_FILE}.bak
+          # 修改分区表：将overlay分区大小改为23M（对应32M Flash，预留其他分区空间）
+          sed -i '/partition@180000 {/,$ s/size = <0x[0-9a-f]*>;/size = <0x1700000>;/' $DTS_FILE
+          sed -i '/partition@180000 {/a \t\t\tlabel = "overlay";' $DTS_FILE
+
+          ## 3.2 扩容rootfs_data（overlay）到23MB（与dts分区表对应，官方标准化配置）
           echo "CONFIG_TARGET_ROOTFS_PARTSIZE=23" >> .config
+          echo "CONFIG_TARGET_ROOTFS_SQUASHFS=y" >> .config # 强制使用squashfs格式，兼容扩容
 
           # 第四步：确保内置完整Luci（继承官方默认，额外显式指定避免遗漏）
           echo "CONFIG_PACKAGE_luci=y" >> .config
           echo "CONFIG_PACKAGE_luci-i18n-base-zh_Hans=y" >> .config
+          echo "CONFIG_PACKAGE_luci-i18n-base-zh-cn=y" >> .config
           echo "CONFIG_PACKAGE_luci-theme-bootstrap=y" >> .config
 
           # 第五步：生成最终配置（解决依赖冲突，确保所有配置生效）
           make defconfig
+
 
       # 步骤6：下载所需软件包（提前缓存，加快编译速度）
       - name: Download Required Packages
