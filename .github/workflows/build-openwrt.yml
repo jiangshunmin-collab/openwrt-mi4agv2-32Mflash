@@ -51,7 +51,7 @@ jobs:
           if [ -f "target/linux/ramips/mt7621/config-6.12" ]; then
             cat target/linux/ramips/mt7621/config-6.12 > .config
           else
-            cat target/linux/ramips/mt7621/config-6.1 > .config
+            cat target/linux/ramips/mt7621/config-6.6 > .config
           fi
 
           # 第二步：强制指定小米4A千兆版V2设备
