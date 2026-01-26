@@ -36,9 +36,9 @@ jobs:
           df -h
 
       # 步骤4：更新并安装feeds（加载Luci等软件源）
-      - name: Replace Feeds with Domestic Mirror (Fix 503 Error)
-        run: |
-          sed -i 's#https://git.openwrt.org#https://mirrors.tuna.tsinghua.edu.cn/openwrt#' feeds.conf.default
+      #- name: Replace Feeds with Domestic Mirror (Fix 503 Error)
+        #run: |
+          #sed -i 's#https://git.openwrt.org#https://mirrors.tuna.tsinghua.edu.cn/openwrt#' feeds.conf.default
       - name: Update & Install OpenWrt Feeds
         run: |
           ./scripts/feeds update -a
