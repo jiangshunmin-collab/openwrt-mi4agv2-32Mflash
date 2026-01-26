@@ -1,0 +1,123 @@
+name: Build OpenWrt (Mi 4A Gigabit v2 - 32M Flash)
+on:
+  workflow_dispatch:  # 仅保留手动触发，避免重复编译（注意：这行必须跟 on: 对齐，缩进 2 个空格）
+
+env:
+  TZ: Asia/Shanghai
+  UPLOAD_FIRMWARE: true
+  FIRMWARE_VERSION: v24.10.2  
+  FIRMWARE_NOTE: 专为小米4a千兆V2定制32M flash版本，芯片型号：MX25L25645GM2I-10G；刷机方法：参考https://www.right.com.cn/forum/thread-8436296-1-1.html，刷机命令改为：breed> flash erase 0x180000 0x1E70000；breed> flash write 0x180000 0x80001000 0x750251。
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      # 步骤1：拉取仓库代码
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # 步骤2：切换到v24.10.2正式版标签
+      - name: Switch to OpenWrt v24.10.2 Official Tag
+        run: |
+          git fetch --tags
+          git checkout tags/v24.10.2 -b v24.10.2
+
+      # 步骤3：初始化编译环境（安装依赖工具）
+      - name: Initialize Compilation Environment
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo rm -rf /etc/apt/sources.list.d/*
+          sudo -E apt-get -qq update
+          sudo -E apt-get -qq install build-essential clang flex bison g++ gawk gcc-multilib gettext git libncurses5-dev libssl-dev python3-distutils rsync unzip zlib1g-dev file wget
+          sudo -E apt-get -qq autoremove --purge
+          sudo -E apt-get -qq clean
+          sudo timedatectl set-timezone "$TZ"
+          df -h
+
+      # 步骤4：更新并安装feeds（加载Luci等软件源）
+      - name: Replace Feeds with Domestic Mirror (Fix 503 Error)
+        run: |
+          sed -i 's#https://git.openwrt.org#https://mirrors.tuna.tsinghua.edu.cn/openwrt#' feeds.conf.default
+      - name: Update & Install OpenWrt Feeds
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      # 步骤5：配置固件（官方默认配置 + 32M Flash适配，无需修改dts）
+      - name: Configure Firmware (Official Default + 32M Flash)
+        run: |
+          # 第一步：加载对应内核版本的官方默认配置（以仓库实际config-6.1为准，兼容config-6.12）
+          if [ -f "target/linux/ramips/mt7621/config-6.12" ]; then
+            cat target/linux/ramips/mt7621/config-6.12 > .config
+          else
+            cat target/linux/ramips/mt7621/config-6.1 > .config
+          fi
+
+          # 第二步：强制指定小米4A千兆版V2设备
+          echo "CONFIG_TARGET_ramips=y" >> .config
+          echo "CONFIG_TARGET_ramips_mt7621=y" >> .config
+          echo "CONFIG_TARGET_ramips_mt7621_DEVICE_xiaomi_mi-router-4a-gigabit-v2=y" >> .config
+          echo "CONFIG_TARGET_MULTI_PROFILE=n" >> .config
+
+          # 第三步：适配32M Flash，扩容rootfs_data到23MB（官方标准化配置，无需修改dts）
+          echo "CONFIG_TARGET_ROOTFS_PARTSIZE=23" >> .config
+
+          # 第四步：确保内置完整Luci（继承官方默认，额外显式指定避免遗漏）
+          echo "CONFIG_PACKAGE_luci=y" >> .config
+          echo "CONFIG_PACKAGE_luci-i18n-base-zh_Hans=y" >> .config
+          echo "CONFIG_PACKAGE_luci-theme-bootstrap=y" >> .config
+
+          # 第五步：生成最终配置（解决依赖冲突，确保所有配置生效）
+          make defconfig
+
+      # 步骤6：下载所需软件包（提前缓存，加快编译速度）
+      - name: Download Required Packages
+        run: make download -j8
+
+      # 步骤7：开始编译固件
+      - name: Compile OpenWrt Firmware
+        run: |
+          echo -e "$(nproc) thread compile started"
+          make -j$(nproc) V=s
+
+      # 步骤8：整理固件文件（定位固件输出目录）
+      - name: Organize Firmware Files
+        id: organize
+        if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+        run: |
+          FIRMWARE_DIR="bin/targets/ramips/mt7621"
+          if [ -d "$FIRMWARE_DIR" ]; then
+            echo "FIRMWARE=$PWD/$FIRMWARE_DIR" >> $GITHUB_ENV
+            echo "Firmware directory found: $PWD/$FIRMWARE_DIR"
+          else
+            echo "Firmware directory not found" && exit 1
+          fi
+
+      # 步骤9：上传固件到Artifacts（临时存储，方便下载）
+      - name: Upload Firmware to Artifacts
+        uses: actions/upload-artifact@v4
+        if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+        with:
+          name: OpenWrt_Firmware_${{ env.FIRMWARE_VERSION }}_Mi4A_Gigabit
+          path: ${{ env.FIRMWARE }}
+
+      # 步骤10：上传固件到Releases（永久存储，方便归档）
+      - name: Upload Firmware to Releases
+        uses: softprops/action-gh-release@v2
+        if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # GitHub自动生成，无需手动配置
+        with:
+          tag_name: ${{ env.FIRMWARE_VERSION }}
+          name: ${{ env.FIRMWARE_VERSION }} - ${{ env.FIRMWARE_NOTE }}
+          body: |
+            ## 固件信息
+            - 版本：${{ env.FIRMWARE_VERSION }}
+            - 设备：小米4A千兆版V2
+            - 适配：32M Flash（rootfs_data扩容至23MB）
+            - 内置：官方完整Luci + 中文语言包 + 默认bootstrap主题
+            - 刷机：推荐telnet命令刷机，需根据固件实际大小调整刷机命令
+          files: ${{ env.FIRMWARE }}/*
+          draft: false
+          prerelease: false
