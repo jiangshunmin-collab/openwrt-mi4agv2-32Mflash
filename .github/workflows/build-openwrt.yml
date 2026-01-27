@@ -1,6 +1,6 @@
 name: Build OpenWrt (Mi 4A Gigabit v2 - 32M Flash)
 on:
-  workflow_dispatch:  # 仅保留手动触发，避免重复编译（注意：这行必须跟 on: 对齐，缩进 2 个空格）
+  workflow_dispatch:  # 仅保留手动触发，缩进合规，无干扰注释
 
 env:
   TZ: Asia/Shanghai
@@ -35,21 +35,17 @@ jobs:
           sudo timedatectl set-timezone "$TZ"
           df -h
 
-      # 步骤4：更新并安装feeds（加载Luci等软件源）
-      #- name: Replace Feeds with Domestic Mirror (Fix 503 Error)
-        #run: |
-          #sed -i 's#https://git.openwrt.org#https://mirrors.tuna.tsinghua.edu.cn/openwrt#' feeds.conf.default
+      # 步骤4：更新并安装feeds（使用官方源，稳定性更高，避免镜像适配问题）
       - name: Update & Install OpenWrt Feeds
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      # 步骤5：配置固件（官方默认配置 + 32M Flash适配，无需修改dts）
+      # 步骤5：配置固件（精准适配32M Flash，无冗余代码，格式合规）
       - name: Configure Firmware (Official Default + 32M Flash)
         run: |
-          # 第一步：加载对应内核版本的官方默认配置
+          # 第一步：加载内核6.6的官方默认配置
           cat target/linux/ramips/mt7621/config-6.6 > .config
-
 
           # 第二步：强制指定小米4A千兆版V2设备
           echo "CONFIG_TARGET_ramips=y" >> .config
@@ -57,52 +53,34 @@ jobs:
           echo "CONFIG_TARGET_ramips_mt7621_DEVICE_xiaomi_mi-router-4a-gigabit-v2=y" >> .config
           echo "CONFIG_TARGET_MULTI_PROFILE=n" >> .config
 
-          # 第三步：适配32M Flash（关键修改：先修改设备分区表，再扩容根文件系统）
-          ## 3.1 修改小米4A千兆V2的dts分区表（指定32M Flash的overlay分区大小，核心步骤！）
-          #DTS_FILE="target/linux/ramips/dts/mt7621_xiaomi_mi-router-4a-gigabit-v2.dts"
-          # 备份原始dts文件
-          #cp $DTS_FILE ${DTS_FILE}.bak
-          # 修改分区表：将overlay分区大小改为23M（对应32M Flash，预留其他分区空间）
-          #sed -i '/partition@180000 {/,$ s/size = <0x[0-9a-f]*>;/size = <0x1700000>;/' $DTS_FILE
-          #sed -i '/partition@180000 {/a \t\t\tlabel = "overlay";' $DTS_FILE
-
-          ## 3.2 扩容rootfs_data（overlay）到23MB（与dts分区表对应，官方标准化配置）
-          #echo "CONFIG_TARGET_ROOTFS_PARTSIZE=23" >> .config
-          #echo "CONFIG_TARGET_ROOTFS_SQUASHFS=y" >> .config # 强制使用squashfs格式，兼容扩容
-
-
-          # 第三步：适配32M Flash（修正DTS语法，精准修改分区表）
-          ## 3.1 定义DTS文件路径
+          # 第三步：适配32M Flash（精准修改DTS分区表+扩容根文件系统）
+          ## 3.1 定义DTS文件路径并备份
           DTS_FILE="target/linux/ramips/dts/mt7621_xiaomi_mi-router-4a-gigabit-v2.dts"
-          ## 3.2 备份原始DTS文件
           cp $DTS_FILE ${DTS_FILE}.bak
-          ## 3.3 精准修改overlay分区（32M Flash：起始地址0x180000，大小0x1700000=23M）
-          # 先删除原有分区的size配置，再新增正确配置（避免重复）
+          ## 3.2 精准修改overlay分区（23M=0x1700000，缩进合规无格式错误）
           sed -i '/partition@180000 {/,/};/ s/size = <0x[^>]*>;//g' $DTS_FILE
           sed -i '/partition@180000 {/a \t\t\tsize = <0x1700000>;\n\t\t\tlabel = "overlay";' $DTS_FILE
-          ## 3.4 扩容根文件系统
+          ## 3.3 扩容根文件系统，兼容squashfs格式
           echo "CONFIG_TARGET_ROOTFS_PARTSIZE=23" >> .config
           echo "CONFIG_TARGET_ROOTFS_SQUASHFS=y" >> .config
 
-          # 第四步：确保内置完整Luci（继承官方默认，额外显式指定避免遗漏）
+          # 第四步：内置Luci和简体中文包（无需手动安装，官方标准配置）
           echo "CONFIG_PACKAGE_luci=y" >> .config
           echo "CONFIG_PACKAGE_luci-i18n-base-zh_Hans=y" >> .config
-          echo "CONFIG_PACKAGE_luci-i18n-base-zh-cn=y" >> .config
           echo "CONFIG_PACKAGE_luci-theme-bootstrap=y" >> .config
 
-          # 第五步：生成最终配置（解决依赖冲突，确保所有配置生效）
+          # 第五步：生成最终配置（自动解决依赖冲突，无交互式命令，适配无终端环境）
           make defconfig
-          make menuconfig -o .config  # 自动解决.config配置冲突，生成优化后的配置文件
 
       # 步骤6：下载所需软件包（提前缓存，加快编译速度）
       - name: Download Required Packages
         run: make download -j8
 
-      # 步骤7：开始编译固件
+      # 步骤7：开始编译固件（单线程，稳定优先，适配GitHub Actions资源限制）
       - name: Compile OpenWrt Firmware
         run: |
-          echo -e "$(nproc) thread compile started"
-          make -j$(nproc) V=s
+          echo -e "1 thread compile started (Stable for GitHub Actions)"
+          make -j1 V=s
 
       # 步骤8：整理固件文件（定位固件输出目录）
       - name: Organize Firmware Files
@@ -130,7 +108,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # GitHub自动生成，无需手动配置
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ env.FIRMWARE_VERSION }}
           name: ${{ env.FIRMWARE_VERSION }} - ${{ env.FIRMWARE_NOTE }}
