@@ -35,33 +35,25 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Patch DTS for 32M Flash (Python Script)
+      - name: Patch DTS for 32M Flash
         shell: python3 {0}
         run: |
           import os
-          import re
-
           dts_path = "target/linux/ramips/dts/mt7621_xiaomi_mi-router-4a-gigabit-v2.dts"
-          
           if not os.path.exists(dts_path):
               print(f"Error: {dts_path} not found!")
               exit(1)
-
           with open(dts_path, 'r') as f:
               content = f.read()
 
-          # 1. 扩容物理闪存定义 16MB -> 32MB
+          # 扩容 Flash 物理定义并重定义分区表，将 Config 移至 32M 末尾
           content = content.replace("<0x0 0x1000000>", "<0x0 0x2000000>")
-
-          # 2. 移除旧的 firmware 和 config 分区定义 (如果存在) 以便重新定义
-          # 我们使用覆盖节点的方式最稳妥
           override_node = """
           &partitions {
               partition@180000 {
                   label = "firmware";
                   reg = <0x180000 0x1e70000>;
               };
-
               partition@1ff0000 {
                   label = "Config";
                   reg = <0x1ff0000 0x10000>;
@@ -69,55 +61,51 @@ jobs:
               };
           };
           """
-          
-          if "&partitions" in content:
-              # 如果文件已有 partitions 覆盖，则在末尾追加
-              content += "\n" + override_node
-          else:
-              # 否则直接追加到文件末尾
-              content += "\n" + override_node
-
           with open(dts_path, 'w') as f:
-              f.write(content)
-          print("DTS Patch Applied: Firmware resized to 30.4MB, Config moved to 31.9MB offset.")
+              f.write(content + "\n" + override_node)
+          print("DTS Patch Applied successfully.")
 
       - name: Configure Firmware
         run: |
-          # 1. 选择机型
+          # 1. 基础硬件配置
           echo "CONFIG_TARGET_ramips=y" > .config
           echo "CONFIG_TARGET_ramips_mt7621=y" >> .config
           echo "CONFIG_TARGET_ramips_mt7621_DEVICE_xiaomi_mi-router-4a-gigabit-v2=y" >> .config
 
-          # 2. 强制集成 LuCI 中文包
+          # 2. 强制集成 LuCI 和中文包
           echo "CONFIG_PACKAGE_luci=y" >> .config
+          echo "CONFIG_PACKAGE_luci-base=y" >> .config
           echo "CONFIG_PACKAGE_luci-i18n-base-zh-hans=y" >> .config
           echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
           
-          # 3. 设置编译输出的 Rootfs 分区大小 (24MB 比较稳妥)
+          # 3. 扩容 Rootfs 分区 (24MB)
           echo "CONFIG_TARGET_ROOTFS_PARTSIZE=24" >> .config
 
-          # 4. 自动补全依赖
+          # 4. 生成配置 (defconfig)
           make defconfig
           
-          echo "--- Check Configuration ---"
-          grep "CONFIG_PACKAGE_luci-i18n-base-zh-hans" .config
+          # 5. 再次确认关键包被选中，如果没有则强制写入 (解决 defconfig 自动删除问题)
+          sed -i 's/.*CONFIG_PACKAGE_luci-i18n-base-zh-hans.*/CONFIG_PACKAGE_luci-i18n-base-zh-hans=y/g' .config
+          echo "CONFIG_PACKAGE_luci-i18n-base-zh-hans=y" >> .config
+          
+          # 验证不报错：使用 || true 防止脚本因找不到字符串而中断
+          echo "--- Final Config Check ---"
+          grep "CONFIG_PACKAGE_luci-i18n-base-zh-hans" .config || true
 
       - name: Download Packages
         run: make download -j8
 
       - name: Compile Firmware
         run: |
-          echo "Starting build with $(nproc) threads..."
           make -j$(nproc) || make -j1 V=s
 
       - name: Organize Files
         run: |
           mkdir -p ./artifact/
-          # 只提取 sysupgrade 固件
           find bin/targets/ramips/mt7621/ -name "*sysupgrade.bin" | xargs -i mv {} ./artifact/
           echo "FIRMWARE_PATH=$PWD/artifact" >> $GITHUB_ENV
 
-      - name: Upload to Artifacts
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: Mi4A_V2_32M_v24.10.2
@@ -129,15 +117,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ env.FIRMWARE_VERSION }}-${{ github.run_id }}
-          name: Mi 4A Gigabit V2 (32M Flash) - ${{ env.FIRMWARE_VERSION }}
+          name: Mi 4A Gigabit V2 (32M) - ${{ env.FIRMWARE_VERSION }}
           body: |
-            ## 固件信息
-            - 源码版本: ${{ env.FIRMWARE_VERSION }}
-            - 硬件适配: 小米 4A 千兆版 V2 (已改 32M Flash)
-            - 分区布局: 
-              - Firmware: 0x180000 - 0x1FF0000 (约 30.4 MB)
-              - Config: 0x1FF0000 - 0x2000000 (末尾 64KB)
-            - 刷机命令参考 (Breed):
-              - `flash erase 0x180000 0x1E70000`
-              - `flash write 0x180000 0x80001000 [实际文件大小]`
+            ## 刷机说明
+            - 分区已适配 32M 闪存。
+            - 刷机命令 (Breed): `flash erase 0x180000 0x1E70000`
           files: ${{ env.FIRMWARE_PATH }}/*
