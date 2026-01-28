@@ -1,4 +1,4 @@
-name: Build OpenWrt gemini(Mi 4A v2 - 32M Final)
+name: Build OpenWrt (Mi 4A Gigabit V2 - 32M Flash) - gemini
 
 on:
   workflow_dispatch:
