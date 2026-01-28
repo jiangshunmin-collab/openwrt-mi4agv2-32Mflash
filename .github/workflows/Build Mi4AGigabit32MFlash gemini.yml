@@ -1,0 +1,128 @@
+name: Build OpenWrt (Mi 4A Gigabit - 32M Flash) - gemini 
+
+on:
+  workflow_dispatch:
+
+env:
+  TZ: Asia/Shanghai
+  FIRMWARE_VERSION: v24.10.2
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Switch to Official Tag
+        run: |
+          git checkout tags/${{ env.FIRMWARE_VERSION }}
+          echo "Checked out: $(git describe --tags)"
+
+      - name: Initialize Environment
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo -E apt-get -qq update
+          sudo -E apt-get -qq install build-essential clang flex bison g++ gawk gcc-multilib gettext git libncurses5-dev libssl-dev python3-distutils rsync unzip zlib1g-dev file wget python3
+          sudo timedatectl set-timezone "$TZ"
+
+      - name: Update & Install Feeds
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Patch DTS for 32M Flash (Standard Edition)
+        shell: python3 {0}
+        run: |
+          import os
+          # 目标指向原始版本 DTS
+          dts_path = "target/linux/ramips/dts/mt7621_xiaomi_mi-router-4a-gigabit.dts"
+          if not os.path.exists(dts_path):
+              print(f"Error: {dts_path} not found!")
+              exit(1)
+          with open(dts_path, 'r') as f:
+              content = f.read()
+
+          # 1. 扩容物理闪存定义 16MB -> 32MB
+          content = content.replace("<0x0 0x1000000>", "<0x0 0x2000000>")
+
+          # 2. 覆盖分区表定义 (适配 32M)
+          # 注意：原始版本的固件分区通常也是从 0x180000 开始
+          override_node = """
+          &partitions {
+              partition@180000 {
+                  label = "firmware";
+                  reg = <0x180000 0x1e70000>;
+              };
+              partition@1ff0000 {
+                  label = "Config";
+                  reg = <0x1ff0000 0x10000>;
+                  read-only;
+              };
+          };
+          """
+          with open(dts_path, 'w') as f:
+              f.write(content + "\n" + override_node)
+          print("DTS Patch Applied for Mi 4A Gigabit Standard Edition.")
+
+      - name: Configure Firmware
+        run: |
+          # 1. 选择机型 (注意这里去掉了 _v2)
+          echo "CONFIG_TARGET_ramips=y" > .config
+          echo "CONFIG_TARGET_ramips_mt7621=y" >> .config
+          echo "CONFIG_TARGET_ramips_mt7621_DEVICE_xiaomi_mi-router-4a-gigabit=y" >> .config
+
+          # 2. 强制集成 LuCI 和中文包
+          echo "CONFIG_PACKAGE_luci=y" >> .config
+          echo "CONFIG_PACKAGE_luci-base=y" >> .config
+          echo "CONFIG_PACKAGE_luci-i18n-base-zh-hans=y" >> .config
+          echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
+          
+          # 3. 扩容 Rootfs 分区 (24MB)
+          echo "CONFIG_TARGET_ROOTFS_PARTSIZE=24" >> .config
+
+          # 4. 生成配置
+          make defconfig
+          
+          # 5. 再次锁定中文包防止被剔除
+          echo "CONFIG_PACKAGE_luci-i18n-base-zh-hans=y" >> .config
+          
+          echo "--- Final Config Check ---"
+          grep "CONFIG_PACKAGE_luci-i18n-base-zh-hans" .config || true
+
+      - name: Download Packages
+        run: make download -j8
+
+      - name: Compile Firmware
+        run: |
+          make -j$(nproc) || make -j1 V=s
+
+      - name: Organize Files
+        run: |
+          mkdir -p ./artifact/
+          find bin/targets/ramips/mt7621/ -name "*sysupgrade.bin" | xargs -i mv {} ./artifact/
+          echo "FIRMWARE_PATH=$PWD/artifact" >> $GITHUB_ENV
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mi4A_Standard_32M_v24.10.2
+          path: ${{ env.FIRMWARE_PATH }}
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: Mi4A_Standard-${{ env.FIRMWARE_VERSION }}-${{ github.run_id }}
+          name: Mi 4A Gigabit Standard (32M) - ${{ env.FIRMWARE_VERSION }}
+          body: |
+            ## 适配说明
+            - 针对物理改装 **32M Flash** 的小米 4A 千兆版（非 V2）。
+            - 修改了 DTS 以支持 32M 寻址，移动了 Config 分区。
+            - **刷机提醒**：Breed 刷入时注意擦除范围。
+          files: ${{ env.FIRMWARE_PATH }}/*
