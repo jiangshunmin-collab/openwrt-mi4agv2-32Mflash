@@ -1,11 +1,10 @@
-name: Build OpenWrt Gemini(Mi 4A v2 - 32M)
+name: Build OpenWrt gemini(Mi 4A v2 - 32M Final)
 
 on:
   workflow_dispatch:
 
 env:
   TZ: Asia/Shanghai
-  UPLOAD_FIRMWARE: true
   FIRMWARE_VERSION: v24.10.2
 
 jobs:
@@ -17,10 +16,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Switch to v24.10.2
+      - name: Switch to Official Tag
         run: |
           git checkout tags/${{ env.FIRMWARE_VERSION }}
-          echo "Checked out version: $(git describe --tags)"
+          echo "Checked out: $(git describe --tags)"
 
       - name: Initialize Environment
         env:
@@ -36,85 +35,109 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Patch DTS for 32M Flash (Crucial Step)
+      - name: Patch DTS for 32M Flash (Python Script)
+        shell: python3 {0}
         run: |
-          # 定义 DTS 路径
-          DTS_FILE="target/linux/ramips/dts/mt7621_xiaomi_mi-router-4a-gigabit-v2.dts"
+          import os
+          import re
+
+          dts_path = "target/linux/ramips/dts/mt7621_xiaomi_mi-router-4a-gigabit-v2.dts"
           
-          echo "=== 修改前检查 DTS 分区定义 ==="
-          grep -A 5 "label = \"firmware\"" $DTS_FILE || echo "未找到 firmware 标签"
+          if not os.path.exists(dts_path):
+              print(f"Error: {dts_path} not found!")
+              exit(1)
 
-          # 使用 sed 精准修改：
-          # 1. 修改 SPI Flash 总大小定义：从 16MB (<0x0 0x1000000>) 改为 32MB (<0x0 0x2000000>)
-          sed -i 's/<0x0 0x1000000>/<0x0 0x2000000>/g' $DTS_FILE
+          with open(dts_path, 'r') as f:
+              content = f.read()
 
-          # 2. 修改 firmware 分区大小：
-          # 原理：0x1000000 (16M) - 0x180000 (u-boot偏移) = 0xE80000 (原大小)
-          # 新增：0x2000000 (32M) - 0x180000 (u-boot偏移) = 0x1E80000 (新大小)
-          # 我们查找 0xe80000 并替换为 0x1e80000
-          sed -i 's/0xe80000/0x1e80000/g' $DTS_FILE
+          # 1. 扩容物理闪存定义 16MB -> 32MB
+          content = content.replace("<0x0 0x1000000>", "<0x0 0x2000000>")
 
-          echo "=== 修改后检查 DTS 分区定义 ==="
-          grep -A 5 "label = \"firmware\"" $DTS_FILE
+          # 2. 移除旧的 firmware 和 config 分区定义 (如果存在) 以便重新定义
+          # 我们使用覆盖节点的方式最稳妥
+          override_node = """
+          &partitions {
+              partition@180000 {
+                  label = "firmware";
+                  reg = <0x180000 0x1e70000>;
+              };
 
-      - name: Configure Firmware (Force 32M & Chinese)
+              partition@1ff0000 {
+                  label = "Config";
+                  reg = <0x1ff0000 0x10000>;
+                  read-only;
+              };
+          };
+          """
+          
+          if "&partitions" in content:
+              # 如果文件已有 partitions 覆盖，则在末尾追加
+              content += "\n" + override_node
+          else:
+              # 否则直接追加到文件末尾
+              content += "\n" + override_node
+
+          with open(dts_path, 'w') as f:
+              f.write(content)
+          print("DTS Patch Applied: Firmware resized to 30.4MB, Config moved to 31.9MB offset.")
+
+      - name: Configure Firmware
         run: |
-          # 1. 基础机型配置
+          # 1. 选择机型
           echo "CONFIG_TARGET_ramips=y" > .config
           echo "CONFIG_TARGET_ramips_mt7621=y" >> .config
           echo "CONFIG_TARGET_ramips_mt7621_DEVICE_xiaomi_mi-router-4a-gigabit-v2=y" >> .config
 
-          # 2. 强制开启 LuCI 和 中文 (使用 append 模式防止被覆盖)
+          # 2. 强制集成 LuCI 中文包
           echo "CONFIG_PACKAGE_luci=y" >> .config
-          echo "CONFIG_PACKAGE_luci-base=y" >> .config
-          echo "CONFIG_PACKAGE_luci-ssl=y" >> .config
-          echo "CONFIG_PACKAGE_luci-mod-admin-full=y" >> .config
           echo "CONFIG_PACKAGE_luci-i18n-base-zh-hans=y" >> .config
           echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
+          
+          # 3. 设置编译输出的 Rootfs 分区大小 (24MB 比较稳妥)
+          echo "CONFIG_TARGET_ROOTFS_PARTSIZE=24" >> .config
 
-          # 3. 调整 Rootfs 大小 (配合 32M Flash)
-          # 设置为 28MB，留 4MB 给内核和其他分区，确保安全
-          echo "CONFIG_TARGET_ROOTFS_PARTSIZE=28" >> .config
-
-          # 4. 生成配置并检查
+          # 4. 自动补全依赖
           make defconfig
           
-          echo "=== 检查中文包是否被选中 ==="
-          grep "CONFIG_PACKAGE_luci-i18n-base-zh-hans" .config || echo "警告：中文包未被选中！"
+          echo "--- Check Configuration ---"
+          grep "CONFIG_PACKAGE_luci-i18n-base-zh-hans" .config
 
       - name: Download Packages
         run: make download -j8
 
       - name: Compile Firmware
         run: |
-          echo "Starting compilation..."
+          echo "Starting build with $(nproc) threads..."
           make -j$(nproc) || make -j1 V=s
 
       - name: Organize Files
         run: |
           mkdir -p ./artifact/
-          # 查找 sysupgrade.bin 文件
+          # 只提取 sysupgrade 固件
           find bin/targets/ramips/mt7621/ -name "*sysupgrade.bin" | xargs -i mv {} ./artifact/
           echo "FIRMWARE_PATH=$PWD/artifact" >> $GITHUB_ENV
 
-      - name: Upload Artifacts
+      - name: Upload to Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Mi4A_v2_32M_Firmware
+          name: Mi4A_V2_32M_v24.10.2
           path: ${{ env.FIRMWARE_PATH }}
 
-      - name: Upload to Releases
+      - name: Create Release
         uses: softprops/action-gh-release@v2
-        if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ env.FIRMWARE_VERSION }}-${{ github.run_id }}
-          name: OpenWrt 24.10.2 - Mi4A v2 (32M Special)
+          name: Mi 4A Gigabit V2 (32M Flash) - ${{ env.FIRMWARE_VERSION }}
           body: |
-            ## 32M 专版说明
-            - **内核分区表已修改**：真正支持 32M Flash 寻址
-            - **RootFS 大小**：已扩容至 28MB (可用空间应 >20MB)
-            - **默认语言**：简体中文
-            - **刷机提示**：Breed 中刷入时，请确保 Breed 能识别到 32M Flash。
+            ## 固件信息
+            - 源码版本: ${{ env.FIRMWARE_VERSION }}
+            - 硬件适配: 小米 4A 千兆版 V2 (已改 32M Flash)
+            - 分区布局: 
+              - Firmware: 0x180000 - 0x1FF0000 (约 30.4 MB)
+              - Config: 0x1FF0000 - 0x2000000 (末尾 64KB)
+            - 刷机命令参考 (Breed):
+              - `flash erase 0x180000 0x1E70000`
+              - `flash write 0x180000 0x80001000 [实际文件大小]`
           files: ${{ env.FIRMWARE_PATH }}/*
