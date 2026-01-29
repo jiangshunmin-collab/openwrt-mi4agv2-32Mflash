@@ -1,4 +1,4 @@
-name: Build OpenWrt (Mi 4A Gigabit V2 - Full Release Directory)
+name: Build Mi 4A Gigabit V2 32M Full Release Directory
 
 on:
   workflow_dispatch:
