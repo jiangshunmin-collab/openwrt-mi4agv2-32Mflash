@@ -1,0 +1,128 @@
+name: Build OpenWrt (Mi 4A Gigabit V2 - Full Release Directory)
+
+on:
+  workflow_dispatch:
+
+env:
+  TZ: Asia/Shanghai
+  FIRMWARE_VERSION: v24.10.2
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write  # 赋予写入 Release 的权限
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Switch to Official Tag
+        run: |
+          git checkout tags/${{ env.FIRMWARE_VERSION }}
+          echo "Checked out: $(git describe --tags)"
+
+      - name: Initialize Environment
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo -E apt-get -qq update
+          sudo -E apt-get -qq install build-essential clang flex bison g++ gawk gcc-multilib gettext git libncurses5-dev libssl-dev python3-distutils rsync unzip zlib1g-dev file wget python3
+          sudo timedatectl set-timezone "$TZ"
+
+      - name: Update & Install Feeds
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Patch DTS for 32M Flash
+        shell: python3 {0}
+        run: |
+          import os
+          dts_path = "target/linux/ramips/dts/mt7621_xiaomi_mi-router-4a-gigabit-v2.dts"
+          if not os.path.exists(dts_path):
+              print(f"Error: {dts_path} not found!")
+              exit(1)
+          with open(dts_path, 'r') as f:
+              content = f.read()
+          content = content.replace("<0x0 0x1000000>", "<0x0 0x2000000>")
+          override_node = """
+          &partitions {
+              partition@180000 {
+                  label = "firmware";
+                  reg = <0x180000 0x1e70000>;
+              };
+              partition@1ff0000 {
+                  label = "Config";
+                  reg = <0x1ff0000 0x10000>;
+                  read-only;
+              };
+          };
+          """
+          with open(dts_path, 'w') as f:
+              f.write(content + "\n" + override_node)
+          print("DTS Patch Applied.")
+
+      - name: Configure Firmware
+        run: |
+          # 1. 基础硬件配置
+          echo "CONFIG_TARGET_ramips=y" > .config
+          echo "CONFIG_TARGET_ramips_mt7621=y" >> .config
+          echo "CONFIG_TARGET_ramips_mt7621_DEVICE_xiaomi_mi-router-4a-gigabit-v2=y" >> .config
+
+          # 2. 启用全选开关：强制编译所有内核模块
+          echo "CONFIG_ALL=y" >> .config
+          echo "CONFIG_ALL_KMODS=y" >> .config
+          
+          # 3. 集成基础 LuCI 与 L2TP
+          echo "CONFIG_PACKAGE_luci=y" >> .config
+          echo "CONFIG_PACKAGE_luci-i18n-base-zh-hans=y" >> .config
+          echo "CONFIG_PACKAGE_luci-proto-ppp=y" >> .config
+
+          # 4. 扩容分区
+          echo "CONFIG_TARGET_ROOTFS_PARTSIZE=24" >> .config
+
+          make defconfig
+
+      - name: Download Packages
+        run: make download -j8
+
+      - name: Compile Firmware
+        run: |
+          make -j$(nproc) || make -j1 V=s
+
+      - name: Prepare Release Assets
+        run: |
+          mkdir -p ./release_files/
+          
+          # 1. 移动固件
+          find bin/targets/ramips/mt7621/ -name "*sysupgrade.bin" | xargs -i mv {} ./release_files/
+          
+          # 2. 收集所有内核相关的 .ipk 文件 (kmod-*)
+          # 我们重点收集内核包，因为这些最容易出版本不兼容问题
+          find bin/targets/ramips/mt7621/kmods/ -name "*.ipk" | xargs -i cp {} ./release_files/
+          
+          # 3. 收集 L2TP 相关的应用包
+          find bin/ -name "xl2tpd*.ipk" | xargs -i cp {} ./release_files/
+          find bin/ -name "ppp-mod-pppol2tp*.ipk" | xargs -i cp {} ./release_files/
+
+          echo "RELEASE_TAG=${{ env.FIRMWARE_VERSION }}-${{ github.run_id }}" >> $GITHUB_ENV
+
+      - name: Create and Upload to Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 创建 Release 标签
+          gh release create ${{ env.RELEASE_TAG }} \
+            --title "Mi 4A V2 (32M) Full Packages - ${{ env.FIRMWARE_VERSION }}" \
+            --notes "固件内置 L2TP 支持。下方列表包含所有 100% 兼容的内核模块 (kmod)，可按需单独下载。"
+
+          # 遍历目录，逐个上传文件到刚刚创建的 Release 中
+          for file in ./release_files/*; do
+            if [ -f "$file" ]; then
+              echo "Uploading $file..."
+              gh release upload ${{ env.RELEASE_TAG }} "$file" --clobber
+            fi
+          done
