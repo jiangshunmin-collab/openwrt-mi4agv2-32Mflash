@@ -1,4 +1,4 @@
-name: Build Mi 4A Gigabit V2 32M Full Release Directory
+name: Build Mi 4A Gigabit V2 32M L2TP Kmods
 
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     permissions:
-      contents: write  # 赋予写入 Release 的权限
+      contents: write
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -63,7 +63,6 @@ jobs:
           """
           with open(dts_path, 'w') as f:
               f.write(content + "\n" + override_node)
-          print("DTS Patch Applied.")
 
       - name: Configure Firmware
         run: |
@@ -72,16 +71,17 @@ jobs:
           echo "CONFIG_TARGET_ramips_mt7621=y" >> .config
           echo "CONFIG_TARGET_ramips_mt7621_DEVICE_xiaomi_mi-router-4a-gigabit-v2=y" >> .config
 
-          # 2. 启用全选开关：强制编译所有内核模块
-          echo "CONFIG_ALL=y" >> .config
+          # 2. 关键：仅编译所有内核模块，不选所有应用
           echo "CONFIG_ALL_KMODS=y" >> .config
           
-          # 3. 集成基础 LuCI 与 L2TP
+          # 3. 集成 LuCI 和 L2TP
           echo "CONFIG_PACKAGE_luci=y" >> .config
           echo "CONFIG_PACKAGE_luci-i18n-base-zh-hans=y" >> .config
           echo "CONFIG_PACKAGE_luci-proto-ppp=y" >> .config
+          echo "CONFIG_PACKAGE_xl2tpd=y" >> .config
+          echo "CONFIG_PACKAGE_ppp-mod-pppol2tp=y" >> .config
 
-          # 4. 扩容分区
+          # 4. 扩容
           echo "CONFIG_TARGET_ROOTFS_PARTSIZE=24" >> .config
 
           make defconfig
@@ -91,38 +91,29 @@ jobs:
 
       - name: Compile Firmware
         run: |
+          # 使用多核编译，如果报错则单核输出详细信息
           make -j$(nproc) || make -j1 V=s
 
-      - name: Prepare Release Assets
+      - name: Prepare Assets
         run: |
           mkdir -p ./release_files/
-          
-          # 1. 移动固件
+          # 提取固件
           find bin/targets/ramips/mt7621/ -name "*sysupgrade.bin" | xargs -i mv {} ./release_files/
-          
-          # 2. 收集所有内核相关的 .ipk 文件 (kmod-*)
-          # 我们重点收集内核包，因为这些最容易出版本不兼容问题
+          # 提取所有内核模块 (.ipk)
           find bin/targets/ramips/mt7621/kmods/ -name "*.ipk" | xargs -i cp {} ./release_files/
-          
-          # 3. 收集 L2TP 相关的应用包
-          find bin/ -name "xl2tpd*.ipk" | xargs -i cp {} ./release_files/
-          find bin/ -name "ppp-mod-pppol2tp*.ipk" | xargs -i cp {} ./release_files/
-
           echo "RELEASE_TAG=${{ env.FIRMWARE_VERSION }}-${{ github.run_id }}" >> $GITHUB_ENV
 
-      - name: Create and Upload to Release
+      - name: Upload to Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 创建 Release 标签
           gh release create ${{ env.RELEASE_TAG }} \
-            --title "Mi 4A V2 (32M) Full Packages - ${{ env.FIRMWARE_VERSION }}" \
-            --notes "固件内置 L2TP 支持。下方列表包含所有 100% 兼容的内核模块 (kmod)，可按需单独下载。"
-
-          # 遍历目录，逐个上传文件到刚刚创建的 Release 中
+            --title "Mi 4A V2 L2TP & All Kmods" \
+            --notes "此版本包含所有内核驱动包，彻底解决 Vermagic 不匹配问题。"
+          
+          # 限制上传数量以防 GitHub 接口超载，优先上传固件和重要插件
           for file in ./release_files/*; do
             if [ -f "$file" ]; then
-              echo "Uploading $file..."
               gh release upload ${{ env.RELEASE_TAG }} "$file" --clobber
             fi
           done
