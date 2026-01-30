@@ -37,17 +37,22 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Patch DTS for 32M Flash
+      - name: Patch DTS for 32M Flash (V2 Model)
         shell: python3 {0}
         run: |
           import os
+          # 明确指定 V2 的 DTS 路径
           dts_path = "target/linux/ramips/dts/mt7621_xiaomi_mi-router-4a-gigabit-v2.dts"
           if not os.path.exists(dts_path):
               print(f"Error: {dts_path} not found!")
               exit(1)
           with open(dts_path, 'r') as f:
               content = f.read()
+          
+          # 扩容 Flash 定义
           content = content.replace("<0x0 0x1000000>", "<0x0 0x2000000>")
+          
+          # 重新定义分区表
           override_node = """
           &partitions {
               partition@180000 {
@@ -63,25 +68,27 @@ jobs:
           """
           with open(dts_path, 'w') as f:
               f.write(content + "\n" + override_node)
+          print("DTS for Mi 4A Gigabit V2 Patched successfully.")
 
       - name: Configure Firmware
         run: |
-          # 1. 基础硬件配置
+          # 1. 硬件平台定义 (V2)
           echo "CONFIG_TARGET_ramips=y" > .config
           echo "CONFIG_TARGET_ramips_mt7621=y" >> .config
           echo "CONFIG_TARGET_ramips_mt7621_DEVICE_xiaomi_mi-router-4a-gigabit-v2=y" >> .config
 
-          # 2. 关键：仅编译所有内核模块，不选所有应用
+          # 2. 启用所有内核模块编译
           echo "CONFIG_ALL_KMODS=y" >> .config
           
-          # 3. 集成 LuCI 和 L2TP
+          # 3. 集成 LuCI 中文界面与 L2TP 协议包
           echo "CONFIG_PACKAGE_luci=y" >> .config
           echo "CONFIG_PACKAGE_luci-i18n-base-zh-hans=y" >> .config
           echo "CONFIG_PACKAGE_luci-proto-ppp=y" >> .config
           echo "CONFIG_PACKAGE_xl2tpd=y" >> .config
           echo "CONFIG_PACKAGE_ppp-mod-pppol2tp=y" >> .config
+          echo "CONFIG_PACKAGE_kmod-pppol2tp=y" >> .config
 
-          # 4. 扩容
+          # 4. 扩容 Rootfs 空间
           echo "CONFIG_TARGET_ROOTFS_PARTSIZE=24" >> .config
 
           make defconfig
@@ -91,35 +98,29 @@ jobs:
 
       - name: Compile Firmware
         run: |
-          # 使用多核编译，如果报错则单核输出详细信息
           make -j$(nproc) || make -j1 V=s
 
-      - name: Prepare Release Assets
+      - name: Prepare Assets
         run: |
           mkdir -p ./release_files/
           
-          # 1. 提取固件
-          find bin/targets/ramips/mt7621/ -name "*sysupgrade.bin" -exec cp {} ./release_files/ \;
+          # 1. 提取固件 (递归查找所有 sysupgrade.bin)
+          find bin/targets/ -name "*sysupgrade.bin" -exec cp {} ./release_files/ \;
           
-          # 2. 暴力搜索并提取所有 kmod 包 (核心修复)
-          # 使用 -exec cp {} 确保不论路径多深都能抓取到
-          find bin/targets/ramips/mt7621/kmods/ -name "kmod-*.ipk" -exec cp {} ./release_files/ \;
+          # 2. 暴力提取所有编译出的 .ipk 包 (包括内核包和插件)
+          # 使用递归 find 避开具体的路径名称，解决文件夹不存在的问题
+          find bin/ -name "*.ipk" -exec cp {} ./release_files/ \;
           
-          # 3. 提取核心 L2TP 应用包
-          find bin/packages/mipsel_24kc/ -name "xl2tpd*.ipk" -exec cp {} ./release_files/ \;
-          find bin/packages/mipsel_24kc/ -name "ppp-mod-pppol2tp*.ipk" -exec cp {} ./release_files/ \;
+          echo "Total files prepared: $(ls ./release_files/ | wc -l)"
+          echo "RELEASE_TAG=Mi4A-V2-32M-${{ github.run_id }}" >> $GITHUB_ENV
 
-          # 检查提取到了多少个文件 (调试用)
-          echo "Total files to upload: $(ls ./release_files/ | wc -l)"
-          echo "RELEASE_TAG=Mi4A-32M-FullKmods-${{ github.run_id }}" >> $GITHUB_ENV
-
-      - name: Create and Upload to Release
+      - name: Upload to Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create ${{ env.RELEASE_TAG }} \
-            --title "Mi 4A Gigabit 32M - 完整驱动列表" \
-            --notes "此列表包含所有 kmod 驱动。如果文件过多，请点击下方 Assets 展开。内核版本: 6.6.93"
-
-          # 批量上传，使用通配符减少连接次数
-          gh release upload ${{ env.RELEASE_TAG }} ./release_files/*.ipk ./release_files/*.bin --clobber
+            --title "Mi 4A Gigabit V2 (32M) - Full Assets" \
+            --notes "此 Release 包含了 V2 机型的固件及所有配套驱动包。如果列表中找不到某个包，请点击 Assets 展开。"
+          
+          # 批量上传所有提取的文件
+          gh release upload ${{ env.RELEASE_TAG }} ./release_files/* --clobber
