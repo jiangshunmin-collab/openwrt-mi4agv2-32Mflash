@@ -1,4 +1,5 @@
 name: Build Mi 4A Gigabit V1 32M Kmods
+
 on:
   workflow_dispatch:
 
@@ -36,18 +37,22 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Patch DTS for 32M Flash
+      - name: Patch DTS for 32M Flash (V1 Standard)
         shell: python3 {0}
         run: |
           import os
-          # 适配原版 (非v2) 路径，如需v2请自行修改文件名
+          # 明确指定 V1 (非 v2) 的 DTS 路径
           dts_path = "target/linux/ramips/dts/mt7621_xiaomi_mi-router-4a-gigabit.dts"
           if not os.path.exists(dts_path):
               print(f"Error: {dts_path} not found!")
               exit(1)
           with open(dts_path, 'r') as f:
               content = f.read()
+          
+          # 扩容 Flash 物理定义 (16M -> 32M)
           content = content.replace("<0x0 0x1000000>", "<0x0 0x2000000>")
+          
+          # 重新定义分区表，适配 32M 布局
           override_node = """
           &partitions {
               partition@180000 {
@@ -63,20 +68,27 @@ jobs:
           """
           with open(dts_path, 'w') as f:
               f.write(content + "\n" + override_node)
+          print("DTS for Mi 4A Gigabit V1 Patched.")
 
       - name: Configure Firmware
         run: |
+          # 1. 硬件平台定义 (V1)
           echo "CONFIG_TARGET_ramips=y" > .config
           echo "CONFIG_TARGET_ramips_mt7621=y" >> .config
           echo "CONFIG_TARGET_ramips_mt7621_DEVICE_xiaomi_mi-router-4a-gigabit=y" >> .config
 
-          # 仅编译内核级包，避开大型应用
+          # 2. 启用全量内核模块编译 (用于解决 opkg 依赖问题)
           echo "CONFIG_ALL_KMODS=y" >> .config
+          
+          # 3. 集成 LuCI 中文界面与 L2TP 协议包
           echo "CONFIG_PACKAGE_luci=y" >> .config
           echo "CONFIG_PACKAGE_luci-i18n-base-zh-hans=y" >> .config
           echo "CONFIG_PACKAGE_luci-proto-ppp=y" >> .config
           echo "CONFIG_PACKAGE_xl2tpd=y" >> .config
           echo "CONFIG_PACKAGE_ppp-mod-pppol2tp=y" >> .config
+          echo "CONFIG_PACKAGE_kmod-pppol2tp=y" >> .config
+
+          # 4. 扩容 Rootfs 空间
           echo "CONFIG_TARGET_ROOTFS_PARTSIZE=24" >> .config
 
           make defconfig
@@ -88,30 +100,38 @@ jobs:
         run: |
           make -j$(nproc) || make -j1 V=s
 
-      - name: Prepare Assets
+      - name: Organize and Compress Assets
         run: |
-          mkdir -p ./release_files/
+          mkdir -p ./final_assets/
+          mkdir -p ./all_kmods/
           
-          # 1. 查找并移动 sysupgrade 固件
-          find bin/targets/ -name "*sysupgrade.bin" -exec cp {} ./release_files/ \;
+          # 1. 提取固件
+          find bin/targets/ -name "*sysupgrade.bin" -exec cp {} ./final_assets/ \;
           
-          # 2. 核心修复：从 bin 根目录开始搜索所有 kmod 包，解决路径不存在的报错
-          # 只提取 kmod 开头的文件，排除冗余
-          find bin/ -name "kmod-*.ipk" -exec cp {} ./release_files/ \;
+          # 2. 归档全量内核驱动包，防止触发 GitHub 上传频率限制 (403 错误)
+          find bin/ -name "kmod-*.ipk" -exec cp {} ./all_kmods/ \;
+          tar -zcvf ./final_assets/All_Kmods_Archive.tar.gz -C ./all_kmods .
           
-          # 3. 提取 L2TP 相关应用包
-          find bin/ -name "xl2tpd*.ipk" -exec cp {} ./release_files/ \;
-          find bin/ -name "ppp-mod-pppol2tp*.ipk" -exec cp {} ./release_files/ \;
-
-          echo "RELEASE_TAG=Mi4A-FullKmods-${{ github.run_id }}" >> $GITHUB_ENV
+          # 3. 单独提取 L2TP 关键包，方便 Release 页面直接下载
+          find bin/ -name "xl2tpd*.ipk" -exec cp {} ./final_assets/ \;
+          find bin/ -name "ppp-mod-pppol2tp*.ipk" -exec cp {} ./final_assets/ \;
+          
+          echo "RELEASE_TAG=Mi4A-V1-32M-Final-${{ github.run_id }}" >> $GITHUB_ENV
 
       - name: Upload to Release
+        uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release create ${{ env.RELEASE_TAG }} \
-            --title "Mi 4A Gigabit 32M - Full Directory" \
-            --notes "已内置 L2TP。下方是 100% 兼容的内核驱动包，由于文件较多，可能需要展开 Assets 列表查看。"
-          
-          # 批量上传，避免循环中的小错误中断进程
-          gh release upload ${{ env.RELEASE_TAG }} ./release_files/*.ipk ./release_files/*.bin --clobber
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: Mi 4A Gigabit V1 (32M) - Optimized Build
+          body: |
+            ## 固件说明
+            - **适配机型**: 小米路由器 4A 千兆版 (V1 / 非 v2)。
+            - **闪存**: 已适配 32M 闪存扩容。
+            - **功能**: 内置 LuCI 中文界面及 L2TP 拨号支持。
+            
+            ## 附件说明
+            - **All_Kmods_Archive.tar.gz**: 包含此固件所有配套的内核驱动 ipk，解决 Vermagic 校验报错。
+            - **xl2tpd / ppp-mod-pppol2tp**: L2TP 核心组件，已单独列出。
+          files: ./final_assets/*
