@@ -1,5 +1,4 @@
 name: Build Mi 4A Gigabit V1 32M Kmods
-
 on:
   workflow_dispatch:
 
@@ -37,22 +36,18 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Patch DTS for 32M Flash (Standard Gigabit Model)
+      - name: Patch DTS for 32M Flash
         shell: python3 {0}
         run: |
           import os
-          # 注意：这里路径修改为非 v2 的路径
+          # 适配原版 (非v2) 路径，如需v2请自行修改文件名
           dts_path = "target/linux/ramips/dts/mt7621_xiaomi_mi-router-4a-gigabit.dts"
           if not os.path.exists(dts_path):
               print(f"Error: {dts_path} not found!")
               exit(1)
           with open(dts_path, 'r') as f:
               content = f.read()
-          
-          # 扩容 Flash 范围从 16M (0x1000000) 到 32M (0x2000000)
           content = content.replace("<0x0 0x1000000>", "<0x0 0x2000000>")
-          
-          # 重新定义分区，让 firmware 占满大部分空间，留 64KB 给最后的 Config
           override_node = """
           &partitions {
               partition@180000 {
@@ -68,26 +63,20 @@ jobs:
           """
           with open(dts_path, 'w') as f:
               f.write(content + "\n" + override_node)
-          print("DTS for Mi 4A Gigabit (Standard) Patched.")
 
       - name: Configure Firmware
         run: |
-          # 1. 基础硬件配置 (注意：这里去掉了 _v2)
           echo "CONFIG_TARGET_ramips=y" > .config
           echo "CONFIG_TARGET_ramips_mt7621=y" >> .config
           echo "CONFIG_TARGET_ramips_mt7621_DEVICE_xiaomi_mi-router-4a-gigabit=y" >> .config
 
-          # 2. 仅全选内核模块，不勾选全量应用 (避免 Rust/Go 编译失败)
+          # 仅编译内核级包，避开大型应用
           echo "CONFIG_ALL_KMODS=y" >> .config
-          
-          # 3. 集成 LuCI、中文包及 L2TP 核心
           echo "CONFIG_PACKAGE_luci=y" >> .config
           echo "CONFIG_PACKAGE_luci-i18n-base-zh-hans=y" >> .config
           echo "CONFIG_PACKAGE_luci-proto-ppp=y" >> .config
           echo "CONFIG_PACKAGE_xl2tpd=y" >> .config
           echo "CONFIG_PACKAGE_ppp-mod-pppol2tp=y" >> .config
-
-          # 4. 扩容 Rootfs 分区
           echo "CONFIG_TARGET_ROOTFS_PARTSIZE=24" >> .config
 
           make defconfig
@@ -99,32 +88,30 @@ jobs:
         run: |
           make -j$(nproc) || make -j1 V=s
 
-      - name: Prepare Release Assets
+      - name: Prepare Assets
         run: |
           mkdir -p ./release_files/
           
-          # 1. 提取固件
-          find bin/targets/ramips/mt7621/ -name "*sysupgrade.bin" -exec cp {} ./release_files/ \;
+          # 1. 查找并移动 sysupgrade 固件
+          find bin/targets/ -name "*sysupgrade.bin" -exec cp {} ./release_files/ \;
           
-          # 2. 暴力搜索并提取所有 kmod 包 (核心修复)
-          # 使用 -exec cp {} 确保不论路径多深都能抓取到
-          find bin/targets/ramips/mt7621/kmods/ -name "kmod-*.ipk" -exec cp {} ./release_files/ \;
+          # 2. 核心修复：从 bin 根目录开始搜索所有 kmod 包，解决路径不存在的报错
+          # 只提取 kmod 开头的文件，排除冗余
+          find bin/ -name "kmod-*.ipk" -exec cp {} ./release_files/ \;
           
-          # 3. 提取核心 L2TP 应用包
-          find bin/packages/mipsel_24kc/ -name "xl2tpd*.ipk" -exec cp {} ./release_files/ \;
-          find bin/packages/mipsel_24kc/ -name "ppp-mod-pppol2tp*.ipk" -exec cp {} ./release_files/ \;
+          # 3. 提取 L2TP 相关应用包
+          find bin/ -name "xl2tpd*.ipk" -exec cp {} ./release_files/ \;
+          find bin/ -name "ppp-mod-pppol2tp*.ipk" -exec cp {} ./release_files/ \;
 
-          # 检查提取到了多少个文件 (调试用)
-          echo "Total files to upload: $(ls ./release_files/ | wc -l)"
-          echo "RELEASE_TAG=Mi4A-32M-FullKmods-${{ github.run_id }}" >> $GITHUB_ENV
+          echo "RELEASE_TAG=Mi4A-FullKmods-${{ github.run_id }}" >> $GITHUB_ENV
 
-      - name: Create and Upload to Release
+      - name: Upload to Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create ${{ env.RELEASE_TAG }} \
-            --title "Mi 4A Gigabit 32M - 完整驱动列表" \
-            --notes "此列表包含所有 kmod 驱动。如果文件过多，请点击下方 Assets 展开。内核版本: 6.6.93"
-
-          # 批量上传，使用通配符减少连接次数
+            --title "Mi 4A Gigabit 32M - Full Directory" \
+            --notes "已内置 L2TP。下方是 100% 兼容的内核驱动包，由于文件较多，可能需要展开 Assets 列表查看。"
+          
+          # 批量上传，避免循环中的小错误中断进程
           gh release upload ${{ env.RELEASE_TAG }} ./release_files/*.ipk ./release_files/*.bin --clobber
