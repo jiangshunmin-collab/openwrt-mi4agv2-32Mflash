@@ -94,26 +94,32 @@ jobs:
           # 使用多核编译，如果报错则单核输出详细信息
           make -j$(nproc) || make -j1 V=s
 
-      - name: Prepare Assets
+      - name: Prepare Release Assets
         run: |
           mkdir -p ./release_files/
-          # 提取固件
-          find bin/targets/ramips/mt7621/ -name "*sysupgrade.bin" | xargs -i mv {} ./release_files/
-          # 提取所有内核模块 (.ipk)
-          find bin/targets/ramips/mt7621/kmods/ -name "*.ipk" | xargs -i cp {} ./release_files/
-          echo "RELEASE_TAG=${{ env.FIRMWARE_VERSION }}-${{ github.run_id }}" >> $GITHUB_ENV
+          
+          # 1. 提取固件
+          find bin/targets/ramips/mt7621/ -name "*sysupgrade.bin" -exec cp {} ./release_files/ \;
+          
+          # 2. 暴力搜索并提取所有 kmod 包 (核心修复)
+          # 使用 -exec cp {} 确保不论路径多深都能抓取到
+          find bin/targets/ramips/mt7621/kmods/ -name "kmod-*.ipk" -exec cp {} ./release_files/ \;
+          
+          # 3. 提取核心 L2TP 应用包
+          find bin/packages/mipsel_24kc/ -name "xl2tpd*.ipk" -exec cp {} ./release_files/ \;
+          find bin/packages/mipsel_24kc/ -name "ppp-mod-pppol2tp*.ipk" -exec cp {} ./release_files/ \;
 
-      - name: Upload to Release
+          # 检查提取到了多少个文件 (调试用)
+          echo "Total files to upload: $(ls ./release_files/ | wc -l)"
+          echo "RELEASE_TAG=Mi4A-32M-FullKmods-${{ github.run_id }}" >> $GITHUB_ENV
+
+      - name: Create and Upload to Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create ${{ env.RELEASE_TAG }} \
-            --title "Mi 4A V2 L2TP & All Kmods" \
-            --notes "此版本包含所有内核驱动包，彻底解决 Vermagic 不匹配问题。"
-          
-          # 限制上传数量以防 GitHub 接口超载，优先上传固件和重要插件
-          for file in ./release_files/*; do
-            if [ -f "$file" ]; then
-              gh release upload ${{ env.RELEASE_TAG }} "$file" --clobber
-            fi
-          done
+            --title "Mi 4A Gigabit 32M - 完整驱动列表" \
+            --notes "此列表包含所有 kmod 驱动。如果文件过多，请点击下方 Assets 展开。内核版本: 6.6.93"
+
+          # 批量上传，使用通配符减少连接次数
+          gh release upload ${{ env.RELEASE_TAG }} ./release_files/*.ipk ./release_files/*.bin --clobber
